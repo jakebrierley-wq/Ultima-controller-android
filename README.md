@@ -1,4 +1,4 @@
-# Ultima Controller Android — Milestone 1
+# Ultima Controller Android — Runtime Import Milestone
 
 Target: Anbernic RG477V, Android 14, 1280×960 4:3 display.
 
@@ -9,6 +9,25 @@ there is no DOSBox integration yet.
 
 No Ultima executables, data files, artwork, or other game assets are included
 in the repository or APK.
+
+## Import legally owned game files
+
+1. Create a ZIP containing your game installation, with `ULTIMA.EXE` at the
+   root of the archive.
+2. Open the app's **Start** menu.
+3. Choose **Import game ZIP** and select the archive with Android's system file
+   picker.
+4. Wait for the import summary. The ZIP is copied and validated before the
+   previous import is replaced.
+
+Imported files are stored under the app's private `filesDir` and are removed
+when the app is uninstalled. The Start menu can replace or remove an import.
+The original ZIP is never modified.
+
+The importer rejects unsafe paths, case-insensitive duplicate file names,
+missing root-level `ULTIMA.EXE`, more than 1,024 files, ZIPs larger than 64 MiB,
+individual expanded files larger than 64 MiB, and expanded installations
+larger than 256 MiB.
 
 ## Default controls
 
@@ -46,9 +65,12 @@ No configuration files are required in the installed app.
   fills the available 4:3 window while leaving system bars usable.
 - Android recreates the activity normally after a real configuration change;
   the selected diagnostic action is restored from instance state.
+- Game ZIP selection uses the Android platform document picker and does not
+  request broad storage permissions.
+- Import extraction runs away from the UI thread and atomically replaces the
+  current private import only after validation succeeds.
 
 ## Out of scope
 
-DOS emulation, game-file handling, and executable launch are intentionally
-deferred until the shell has been verified to launch and remain open on the
-target Android 14 hardware.
+DOS emulation and executable launch remain intentionally deferred. Importing
+files only validates and stores them; it does not execute game code.

@@ -2,9 +2,13 @@ package com.jakebrierley.ultimacontroller
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
+import android.text.format.Formatter
 import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -13,6 +17,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
@@ -21,8 +26,19 @@ class MainActivity : Activity() {
     private lateinit var outputText: TextView
     private lateinit var displayText: TextView
     private lateinit var bridge: EmulatorBridge
+    private lateinit var contentView: View
+    private val ioExecutor = Executors.newSingleThreadExecutor()
+    private var operationDialog: AlertDialog? = null
     private var actionIndex = 0
     private var dialogOpen = false
+    private val statusRefresh = object : Runnable {
+        override fun run() {
+            refreshDisplayStatus()
+            if (GameStorage.isOperationInProgress()) {
+                contentView.postDelayed(this, STATUS_REFRESH_MILLIS)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,21 +48,33 @@ class MainActivity : Activity() {
             ?.coerceIn(0, Commands.all.lastIndex)
             ?: 0
 
-        val content = buildUi()
-        setContentView(content)
+        contentView = buildUi()
+        setContentView(contentView)
         bridge = EmulatorBridge { message -> outputText.text = message }
         updateAction()
-        content.post {
-            val orientation = when (resources.configuration.orientation) {
-                Configuration.ORIENTATION_LANDSCAPE -> "landscape"
-                Configuration.ORIENTATION_PORTRAIT -> "portrait"
-                else -> "unspecified"
-            }
-            displayText.text =
-                "CONTROLLER SHELL\n\n" +
-                    "Window ${content.width} × ${content.height} ($orientation)\n" +
-                    "No DOS core or game files are bundled"
+        contentView.post(statusRefresh)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::contentView.isInitialized) {
+            contentView.removeCallbacks(statusRefresh)
+            contentView.post(statusRefresh)
         }
+    }
+
+    override fun onPause() {
+        if (::contentView.isInitialized) {
+            contentView.removeCallbacks(statusRefresh)
+        }
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        operationDialog?.dismiss()
+        operationDialog = null
+        ioExecutor.shutdown()
+        super.onDestroy()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -111,6 +139,33 @@ class MainActivity : Activity() {
         root.addView(outputText)
 
         return root
+    }
+
+    private fun refreshDisplayStatus() {
+        if (!::contentView.isInitialized || contentView.width == 0) return
+
+        val orientation = when (resources.configuration.orientation) {
+            Configuration.ORIENTATION_LANDSCAPE -> "landscape"
+            Configuration.ORIENTATION_PORTRAIT -> "portrait"
+            else -> "unspecified"
+        }
+        val importStatus = when {
+            GameStorage.isOperationInProgress() -> "Game import: working…"
+            else -> {
+                val summary = GameStorage.currentSummary(this)
+                if (summary == null) {
+                    "Game import: none\nStart → Import game ZIP"
+                } else {
+                    val size = Formatter.formatShortFileSize(this, summary.totalBytes)
+                    "Game import: ready (${summary.fileCount} files, $size)"
+                }
+            }
+        }
+        displayText.text =
+            "CONTROLLER SHELL\n\n" +
+                "Window ${contentView.width} × ${contentView.height} ($orientation)\n" +
+                "$importStatus\n" +
+                "DOS core not connected; no game files are bundled"
     }
 
     private fun dp(value: Int): Int =
@@ -184,22 +239,223 @@ class MainActivity : Activity() {
 
     private fun showSystemMenu() {
         dialogOpen = true
-        val items = arrayOf("Resume", "Send Enter", "Send Escape", "Show key picker", "Exit app")
+        val existingImport = GameStorage.currentSummary(this)
+        val items = buildList {
+            add(SystemMenuItem("Resume") {})
+            add(
+                SystemMenuItem(
+                    if (existingImport == null) {
+                        "Import game ZIP"
+                    } else {
+                        "Replace game ZIP"
+                    },
+                ) {
+                    showImportConfirmation(replacing = existingImport != null)
+                },
+            )
+            if (existingImport != null) {
+                add(SystemMenuItem("Remove imported game") { showRemoveConfirmation() })
+            }
+            add(SystemMenuItem("Send Enter") { bridge.sendSpecial("ENTER") })
+            add(SystemMenuItem("Send Escape") { bridge.sendSpecial("ESC") })
+            add(SystemMenuItem("Show key picker") { showKeyPicker() })
+            add(SystemMenuItem("Exit app") { finish() })
+        }
+        var pendingAction: (() -> Unit)? = null
         AlertDialog.Builder(this)
             .setTitle("SYSTEM")
-            .setItems(items) { _, which ->
-                when (which) {
-                    1 -> bridge.sendSpecial("ENTER")
-                    2 -> bridge.sendSpecial("ESC")
-                    3 -> window.decorView.post { showKeyPicker() }
-                    4 -> finish()
-                }
+            .setItems(items.map { it.label }.toTypedArray()) { _, which ->
+                pendingAction = items[which].action
             }
+            .setOnDismissListener {
+                dialogOpen = false
+                pendingAction?.let { action -> contentView.post { action() } }
+            }
+            .show()
+    }
+
+    private fun showImportConfirmation(replacing: Boolean) {
+        dialogOpen = true
+        var chooseArchive = false
+        val message = if (replacing) {
+            "Choose a ZIP containing your legally owned game installation. " +
+                "ULTIMA.EXE must be at the ZIP root. The current private import " +
+                "will be replaced only after the new ZIP passes validation."
+        } else {
+            "Choose a ZIP containing your legally owned game installation. " +
+                "ULTIMA.EXE must be at the ZIP root. Files will be validated and " +
+                "copied into this app's private storage."
+        }
+        AlertDialog.Builder(this)
+            .setTitle(if (replacing) "REPLACE GAME FILES" else "IMPORT GAME FILES")
+            .setMessage(message)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Choose ZIP") { _, _ -> chooseArchive = true }
+            .setOnDismissListener {
+                dialogOpen = false
+                if (chooseArchive) contentView.post { launchGameImportPicker() }
+            }
+            .show()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun launchGameImportPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/zip"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(
+                    "application/zip",
+                    "application/x-zip-compressed",
+                    "application/octet-stream",
+                ),
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQUEST_IMPORT_GAME_ZIP)
+        } catch (_: ActivityNotFoundException) {
+            showMessage(
+                "IMPORT UNAVAILABLE",
+                "Android could not find a document picker for ZIP files.",
+            )
+        }
+    }
+
+    @Deprecated("Uses the platform result API to keep the startup shell AndroidX-free")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_IMPORT_GAME_ZIP || resultCode != RESULT_OK) return
+        val selectedArchive = data?.data ?: return
+        beginImport(selectedArchive)
+    }
+
+    private fun beginImport(selectedArchive: Uri) {
+        if (GameStorage.isOperationInProgress()) {
+            showMessage("GAME FILES", "Another game-file operation is already running.")
+            return
+        }
+
+        showOperationDialog("Importing and validating the selected ZIP…")
+        ioExecutor.execute {
+            val result = runCatching {
+                GameStorage.importArchive(applicationContext, selectedArchive)
+            }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                finishOperationDialog()
+                contentView.post(statusRefresh)
+                result.fold(
+                    onSuccess = { summary ->
+                        val size = Formatter.formatShortFileSize(this, summary.totalBytes)
+                        showMessage(
+                            "IMPORT COMPLETE",
+                            "${summary.fileCount} files imported ($size).\n\n" +
+                                "Archive SHA-256:\n${summary.archiveSha256}\n\n" +
+                                "The DOS core remains disabled.",
+                        )
+                    },
+                    onFailure = { error ->
+                        showMessage(
+                            "IMPORT FAILED",
+                            error.message ?: "The selected ZIP could not be imported.",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    private fun showRemoveConfirmation() {
+        dialogOpen = true
+        var removeImport = false
+        AlertDialog.Builder(this)
+            .setTitle("REMOVE GAME FILES")
+            .setMessage(
+                "Delete the imported private copy? The original ZIP will not be changed.",
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Remove") { _, _ -> removeImport = true }
+            .setOnDismissListener {
+                dialogOpen = false
+                if (removeImport) contentView.post { beginRemoveImport() }
+            }
+            .show()
+    }
+
+    private fun beginRemoveImport() {
+        if (GameStorage.isOperationInProgress()) {
+            showMessage("GAME FILES", "Another game-file operation is already running.")
+            return
+        }
+
+        showOperationDialog("Removing the private game-file copy…")
+        ioExecutor.execute {
+            val result = runCatching { GameStorage.removeImport(applicationContext) }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                finishOperationDialog()
+                contentView.post(statusRefresh)
+                result.fold(
+                    onSuccess = { removed ->
+                        showMessage(
+                            "GAME FILES",
+                            if (removed) {
+                                "The imported private copy was removed."
+                            } else {
+                                "No imported game files were present."
+                            },
+                        )
+                    },
+                    onFailure = { error ->
+                        showMessage(
+                            "REMOVE FAILED",
+                            error.message ?: "The imported files could not be removed.",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    private fun showOperationDialog(message: String) {
+        dialogOpen = true
+        operationDialog = AlertDialog.Builder(this)
+            .setTitle("GAME FILES")
+            .setMessage(message)
+            .setCancelable(false)
+            .create()
+            .also { dialog ->
+                dialog.setOnDismissListener { dialogOpen = false }
+                dialog.show()
+            }
+    }
+
+    private fun finishOperationDialog() {
+        operationDialog?.dismiss()
+        operationDialog = null
+        dialogOpen = false
+    }
+
+    private fun showMessage(title: String, message: String) {
+        dialogOpen = true
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("OK", null)
             .setOnDismissListener { dialogOpen = false }
             .show()
     }
 
+    private data class SystemMenuItem(
+        val label: String,
+        val action: () -> Unit,
+    )
+
     private companion object {
         const val STATE_ACTION_INDEX = "action_index"
+        const val REQUEST_IMPORT_GAME_ZIP = 1001
+        const val STATUS_REFRESH_MILLIS = 500L
     }
 }

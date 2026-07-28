@@ -11,8 +11,8 @@ android {
         applicationId = "com.jakebrierley.ultimacontroller"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1-m1"
+        versionCode = 2
+        versionName = "0.2-import"
     }
 
     compileOptions {
@@ -21,4 +21,8 @@ android {
     }
 
     kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }

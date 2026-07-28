@@ -1,6 +1,7 @@
 # Current status
 
 Implemented:
+- RG477V Android 14 cold-launch validation
 - Orientation-neutral 4:3 diagnostic interface
 - Platform-only startup activity with no AndroidX runtime dependency
 - Activity state restoration across normal configuration changes
@@ -11,6 +12,11 @@ Implemented:
 - Raw Android controller keyCode/scanCode reporting
 - No external configuration files
 - No copyrighted game files in the repository or APK
+- Runtime ZIP selection through Android's system document picker
+- Bounded, path-safe ZIP extraction into app-private storage
+- Atomic import replacement, interrupted-replacement recovery, and removal
+- Import archive checksum and file/size summary
+- CI guard that rejects bundled game assets
 
 Not yet implemented:
 - DOS emulation core
