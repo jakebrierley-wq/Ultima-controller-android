@@ -12,8 +12,8 @@ android {
         applicationId = "com.jakebrierley.ultimacontroller"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.3.1-video-bootstrap"
+        versionCode = 5
+        versionName = "0.3.2-black-frame-diagnostics"
 
         ndk {
             abiFilters += "arm64-v8a"

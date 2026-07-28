@@ -21,8 +21,9 @@ Implemented:
 - Pinned DOSBox Pure 1.0-preview6 source submodule
 - Arm64 Android NDK build with 16 KiB ELF page alignment
 - Minimal libretro environment, video, audio, input, and lifecycle frontend
-- 4:3-aware nearest-neighbour software rendering to a platform SurfaceView
-- First-frame-gated running status with visible surface/video diagnostics
+- 4:3-aware nearest-neighbour software rendering to a platform TextureView
+- First-visible-frame status with format, pixel-sampling, and magenta-border
+  diagnostics for black core output
 - Stereo PCM output through Android AudioTrack
 - DOS keyboard event delivery from the persistent controller shell
 - Per-import app-private DOSBox Pure save directory

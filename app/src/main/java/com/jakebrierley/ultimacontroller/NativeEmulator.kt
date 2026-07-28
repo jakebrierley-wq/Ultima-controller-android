@@ -4,13 +4,14 @@
 package com.jakebrierley.ultimacontroller
 
 import android.content.Context
+import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Handler
 import android.os.Looper
 import android.view.Surface
-import android.view.SurfaceHolder
+import android.view.TextureView
 import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
@@ -32,13 +33,17 @@ data class EmulatorStatus(
 class NativeEmulator(
     context: Context,
     private val statusListener: (EmulatorStatus) -> Unit,
-) : EmulatorInput, SurfaceHolder.Callback, Closeable {
+) : EmulatorInput, TextureView.SurfaceTextureListener, Closeable {
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val resumed = AtomicBoolean(false)
     private var audioTrack: AudioTrack? = null
-    private var attachedHolder: SurfaceHolder? = null
+    private var attachedTextureView: TextureView? = null
+    private var displaySurface: Surface? = null
     private var libraryReady = false
+    @Volatile
+    private var videoStatusMessage =
+        "DOSBox Pure loaded; waiting for its first visible frame"
     @Volatile
     private var videoReady = false
     @Volatile
@@ -47,13 +52,14 @@ class NativeEmulator(
     val isRunning: Boolean
         get() = started
 
-    fun attachTo(holder: SurfaceHolder) {
-        if (attachedHolder === holder) return
-        attachedHolder?.removeCallback(this)
-        attachedHolder = holder
-        holder.addCallback(this)
-        if (holder.surface?.isValid == true) {
-            setSurface(holder.surface)
+    fun attachTo(textureView: TextureView) {
+        if (attachedTextureView === textureView) return
+        attachedTextureView?.surfaceTextureListener = null
+        releaseDisplaySurface()
+        attachedTextureView = textureView
+        textureView.surfaceTextureListener = this
+        if (textureView.isAvailable) {
+            textureView.surfaceTexture?.let(::replaceDisplaySurface)
         }
     }
 
@@ -66,9 +72,13 @@ class NativeEmulator(
             )
             return false
         }
-        attachedHolder?.surface
-            ?.takeIf(Surface::isValid)
-            ?.let(::setSurface)
+        if (displaySurface?.isValid != true) {
+            attachedTextureView
+                ?.takeIf { it.isAvailable }
+                ?.surfaceTexture
+                ?.let(::replaceDisplaySurface)
+        }
+        displaySurface?.takeIf(Surface::isValid)?.let(::setSurface)
         if (!gameExecutable.isFile || gameExecutable.length() <= 0L) {
             publishStatus(
                 EmulatorState.ERROR,
@@ -92,6 +102,8 @@ class NativeEmulator(
 
         publishStatus(EmulatorState.STARTING, "Starting DOSBox Pure…")
         videoReady = false
+        videoStatusMessage =
+            "DOSBox Pure loaded; waiting for its first visible frame"
         started = nativeStart(
             gameExecutable.absolutePath,
             systemDirectory.absolutePath,
@@ -123,11 +135,7 @@ class NativeEmulator(
             nativeSetPaused(false)
             publishStatus(
                 if (videoReady) EmulatorState.RUNNING else EmulatorState.STARTING,
-                if (videoReady) {
-                    "DOSBox Pure video is active"
-                } else {
-                    "DOSBox Pure loaded; waiting for its first video frame"
-                },
+                videoStatusMessage,
             )
         }
     }
@@ -156,6 +164,7 @@ class NativeEmulator(
         }
         started = false
         videoReady = false
+        videoStatusMessage = "Emulator stopped"
         releaseAudio()
         publishStatus(EmulatorState.IDLE, "Emulator stopped")
     }
@@ -169,27 +178,36 @@ class NativeEmulator(
         }
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        setSurface(holder.surface)
-    }
-
-    override fun surfaceChanged(
-        holder: SurfaceHolder,
-        format: Int,
+    override fun onSurfaceTextureAvailable(
+        surfaceTexture: SurfaceTexture,
         width: Int,
         height: Int,
     ) {
-        setSurface(holder.surface)
+        replaceDisplaySurface(surfaceTexture)
     }
 
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    override fun onSurfaceTextureSizeChanged(
+        surfaceTexture: SurfaceTexture,
+        width: Int,
+        height: Int,
+    ) {
+        displaySurface?.takeIf(Surface::isValid)?.let(::setSurface)
+    }
+
+    override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
         setSurface(null)
+        releaseDisplaySurface()
+        return true
+    }
+
+    override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {
     }
 
     override fun close() {
-        attachedHolder?.removeCallback(this)
-        attachedHolder = null
+        attachedTextureView?.surfaceTextureListener = null
+        attachedTextureView = null
         setSurface(null)
+        releaseDisplaySurface()
         stop()
     }
 
@@ -199,22 +217,30 @@ class NativeEmulator(
             status.startsWith("running:") -> {
                 started = true
                 videoReady = true
+                videoStatusMessage =
+                    "DOSBox Pure visible (${status.removePrefix("running:")})"
                 publishStatus(
                     EmulatorState.RUNNING,
-                    "DOSBox Pure video active (${status.removePrefix("running:")})",
+                    videoStatusMessage,
                 )
             }
 
+            status.startsWith("black:") -> {
+                videoReady = false
+                videoStatusMessage = status.removePrefix("black:")
+                publishStatus(EmulatorState.STARTING, videoStatusMessage)
+            }
+
             status.startsWith("video_wait:") -> {
-                publishStatus(
-                    EmulatorState.STARTING,
-                    status.removePrefix("video_wait:"),
-                )
+                videoReady = false
+                videoStatusMessage = status.removePrefix("video_wait:")
+                publishStatus(EmulatorState.STARTING, videoStatusMessage)
             }
 
             status == "stopped" -> {
                 started = false
                 videoReady = false
+                videoStatusMessage = "DOSBox Pure stopped"
                 releaseAudio()
                 publishStatus(EmulatorState.IDLE, "DOSBox Pure stopped")
             }
@@ -318,6 +344,18 @@ class NativeEmulator(
         if (libraryReady) {
             nativeSetSurface(surface)
         }
+    }
+
+    private fun replaceDisplaySurface(surfaceTexture: SurfaceTexture) {
+        setSurface(null)
+        releaseDisplaySurface()
+        displaySurface = Surface(surfaceTexture)
+        setSurface(displaySurface)
+    }
+
+    private fun releaseDisplaySurface() {
+        displaySurface?.release()
+        displaySurface = null
     }
 
     private fun ensureNativeLibrary(): Boolean {

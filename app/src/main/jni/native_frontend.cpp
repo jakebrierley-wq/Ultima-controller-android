@@ -57,16 +57,20 @@ std::string saveDirectory;
 
 std::atomic<bool> contentLoaded{false};
 std::atomic<bool> videoPresented{false};
+std::atomic<bool> sourceVisible{false};
 std::atomic<bool> extendedVideoWaitReported{false};
 std::atomic<unsigned> videoCallbackCount{0};
 std::atomic<unsigned> videoLockFailureCount{0};
 std::atomic<unsigned> emulationRunCount{0};
 std::atomic<int> surfaceWidth{0};
 std::atomic<int> surfaceHeight{0};
+std::atomic<int> lastBufferFormat{0};
 std::atomic<unsigned> lastSourceWidth{0};
 std::atomic<unsigned> lastSourceHeight{0};
 std::atomic<int> lastDestinationWidth{0};
 std::atomic<int> lastDestinationHeight{0};
+std::atomic<unsigned> lastSampleCount{0};
+std::atomic<unsigned> lastNonBlackSampleCount{0};
 
 std::atomic<retro_keyboard_event_t> keyboardEvent{nullptr};
 std::atomic<int16_t> joypadState[16];
@@ -147,7 +151,8 @@ std::string videoWaitStatus() {
     return std::string("DOSBox Pure loaded ULTIMA.EXE; waiting for the first ") +
         "posted video frame (surface " +
         std::to_string(surfaceWidth.load()) + "x" +
-        std::to_string(surfaceHeight.load()) + ", callbacks " +
+        std::to_string(surfaceHeight.load()) + ", format " +
+        std::to_string(lastBufferFormat.load()) + ", callbacks " +
         std::to_string(videoCallbackCount.load()) + ", lock failures " +
         std::to_string(videoLockFailureCount.load()) + ")";
 }
@@ -158,7 +163,25 @@ void notifyVideoRunning() {
         std::to_string(lastSourceWidth.load()) + "x" +
         std::to_string(lastSourceHeight.load()) + " to " +
         std::to_string(lastDestinationWidth.load()) + "x" +
-        std::to_string(lastDestinationHeight.load())
+        std::to_string(lastDestinationHeight.load()) + ", format " +
+        std::to_string(lastBufferFormat.load()) + ", nonblack samples " +
+        std::to_string(lastNonBlackSampleCount.load()) + "/" +
+        std::to_string(lastSampleCount.load()) +
+        "; RGB test bar at top-left"
+    );
+}
+
+void notifyBlackFrame() {
+    notifyStatus(
+        std::string("black:Core frames are entirely black; a magenta border ") +
+        "and RGB test bar should still be visible (source " +
+        std::to_string(lastSourceWidth.load()) + "x" +
+        std::to_string(lastSourceHeight.load()) + ", surface " +
+        std::to_string(lastDestinationWidth.load()) + "x" +
+        std::to_string(lastDestinationHeight.load()) + ", format " +
+        std::to_string(lastBufferFormat.load()) + ", samples " +
+        std::to_string(lastNonBlackSampleCount.load()) + "/" +
+        std::to_string(lastSampleCount.load()) + ")"
     );
 }
 
@@ -344,6 +367,37 @@ void RETRO_CALLCONV videoCallback(
     }
 
     videoCallbackCount.fetch_add(1);
+    lastSourceWidth.store(width);
+    lastSourceHeight.store(height);
+
+    const auto* sourceBytes = static_cast<const uint8_t*>(data);
+    const unsigned safeSourceWidth = std::min(
+        width,
+        static_cast<unsigned>(pitch / sizeof(uint32_t))
+    );
+    const unsigned sampleStepX = std::max(1u, safeSourceWidth / 64u);
+    const unsigned sampleStepY = std::max(1u, height / 64u);
+    unsigned sampleCount = 0;
+    unsigned nonBlackSampleCount = 0;
+    for (unsigned y = 0; y < height; y += sampleStepY) {
+        const auto* sourceRow = reinterpret_cast<const uint32_t*>(
+            sourceBytes + static_cast<size_t>(y) * pitch
+        );
+        for (unsigned x = 0; x < safeSourceWidth; x += sampleStepX) {
+            ++sampleCount;
+            if ((sourceRow[x] & 0x00ffffffu) != 0) {
+                ++nonBlackSampleCount;
+            }
+        }
+    }
+    lastSampleCount.store(sampleCount);
+    lastNonBlackSampleCount.store(nonBlackSampleCount);
+    const bool frameHasVisiblePixels = nonBlackSampleCount > 0;
+    bool firstVisibleFrame = false;
+    if (frameHasVisiblePixels) {
+        firstVisibleFrame = !sourceVisible.exchange(true);
+    }
+
     std::lock_guard<std::mutex> lock(surfaceMutex);
     if (nativeWindow == nullptr) {
         return;
@@ -363,17 +417,71 @@ void RETRO_CALLCONV videoCallback(
         return;
     }
 
-    auto* destination = static_cast<uint32_t*>(windowBuffer.bits);
+    lastBufferFormat.store(windowBuffer.format);
     const int destinationWidth = windowBuffer.width;
     const int destinationHeight = windowBuffer.height;
     const int destinationStride = windowBuffer.stride;
-
-    for (int y = 0; y < destinationHeight; ++y) {
-        std::fill_n(
-            destination + y * destinationStride,
+    lastDestinationWidth.store(destinationWidth);
+    lastDestinationHeight.store(destinationHeight);
+    if (windowBuffer.bits == nullptr ||
+        destinationWidth <= 0 ||
+        destinationHeight <= 0 ||
+        destinationStride < destinationWidth) {
+        ANativeWindow_unlockAndPost(nativeWindow);
+        videoLockFailureCount.fetch_add(1);
+        __android_log_print(
+            ANDROID_LOG_ERROR,
+            kLogTag,
+            "Invalid video buffer: %dx%d stride=%d bits=%p",
+            destinationWidth,
+            destinationHeight,
             destinationStride,
-            0xff000000u
+            windowBuffer.bits
         );
+        return;
+    }
+
+    const bool isRgba8888 =
+        windowBuffer.format == WINDOW_FORMAT_RGBA_8888 ||
+        windowBuffer.format == WINDOW_FORMAT_RGBX_8888;
+    const bool isRgb565 = windowBuffer.format == WINDOW_FORMAT_RGB_565;
+    if (!isRgba8888 && !isRgb565) {
+        ANativeWindow_unlockAndPost(nativeWindow);
+        const unsigned failureNumber =
+            videoLockFailureCount.fetch_add(1) + 1;
+        __android_log_print(
+            ANDROID_LOG_ERROR,
+            kLogTag,
+            "Unsupported video buffer format: %d",
+            windowBuffer.format
+        );
+        if (failureNumber == 1 && contentLoaded.load()) {
+            notifyStatus(
+                std::string("error:Unsupported Android video buffer format ") +
+                std::to_string(windowBuffer.format)
+            );
+        }
+        return;
+    }
+
+    auto* destination8888 =
+        isRgba8888 ? static_cast<uint32_t*>(windowBuffer.bits) : nullptr;
+    auto* destination565 =
+        isRgb565 ? static_cast<uint16_t*>(windowBuffer.bits) : nullptr;
+    for (int y = 0; y < destinationHeight; ++y) {
+        if (isRgba8888) {
+            std::fill_n(
+                destination8888 + y * destinationStride,
+                destinationStride,
+                0xff000000u
+            );
+        } else {
+            std::fill_n(
+                destination565 + y * destinationStride,
+                destinationStride,
+                static_cast<uint16_t>(0)
+            );
+        }
     }
 
     float contentAspect = displayAspectRatio.load();
@@ -396,7 +504,6 @@ void RETRO_CALLCONV videoCallback(
 
     const int offsetX = (destinationWidth - renderWidth) / 2;
     const int offsetY = (destinationHeight - renderHeight) / 2;
-    const auto* sourceBytes = static_cast<const uint8_t*>(data);
 
     for (int y = 0; y < renderHeight; ++y) {
         const unsigned sourceY =
@@ -407,8 +514,14 @@ void RETRO_CALLCONV videoCallback(
         const auto* sourceRow = reinterpret_cast<const uint32_t*>(
             sourceBytes + static_cast<size_t>(sourceY) * pitch
         );
-        auto* destinationRow =
-            destination + (offsetY + y) * destinationStride + offsetX;
+        auto* destinationRow8888 = isRgba8888
+            ? destination8888 +
+                (offsetY + y) * destinationStride + offsetX
+            : nullptr;
+        auto* destinationRow565 = isRgb565
+            ? destination565 +
+                (offsetY + y) * destinationStride + offsetX
+            : nullptr;
 
         for (int x = 0; x < renderWidth; ++x) {
             const unsigned sourceX =
@@ -420,8 +533,67 @@ void RETRO_CALLCONV videoCallback(
             const uint32_t red = (xrgb >> 16u) & 0xffu;
             const uint32_t green = (xrgb >> 8u) & 0xffu;
             const uint32_t blue = xrgb & 0xffu;
-            destinationRow[x] =
-                0xff000000u | (blue << 16u) | (green << 8u) | red;
+            if (isRgba8888) {
+                destinationRow8888[x] =
+                    0xff000000u | (blue << 16u) | (green << 8u) | red;
+            } else {
+                destinationRow565[x] = static_cast<uint16_t>(
+                    ((red >> 3u) << 11u) |
+                    ((green >> 2u) << 5u) |
+                    (blue >> 3u)
+                );
+            }
+        }
+    }
+
+    if (!frameHasVisiblePixels) {
+        const int border = std::max(
+            2,
+            std::min(8, std::min(destinationWidth, destinationHeight) / 40)
+        );
+        for (int y = 0; y < destinationHeight; ++y) {
+            const bool horizontalBorder =
+                y < border || y >= destinationHeight - border;
+            for (int x = 0; x < destinationWidth; ++x) {
+                if (!horizontalBorder &&
+                    x >= border &&
+                    x < destinationWidth - border) {
+                    continue;
+                }
+                const int destinationIndex = y * destinationStride + x;
+                if (isRgba8888) {
+                    destination8888[destinationIndex] = 0xffff00ffu;
+                } else {
+                    destination565[destinationIndex] =
+                        static_cast<uint16_t>(0xf81fu);
+                }
+            }
+        }
+    }
+
+    const int testBarWidth = std::min(96, destinationWidth);
+    const int testBarHeight = std::min(12, destinationHeight);
+    for (int y = 0; y < testBarHeight; ++y) {
+        for (int x = 0; x < testBarWidth; ++x) {
+            const int segment = std::min(3, x * 4 / testBarWidth);
+            const int destinationIndex = y * destinationStride + x;
+            if (isRgba8888) {
+                static constexpr uint32_t colors[] = {
+                    0xff0000ffu,
+                    0xff00ff00u,
+                    0xffff0000u,
+                    0xffffffffu,
+                };
+                destination8888[destinationIndex] = colors[segment];
+            } else {
+                static constexpr uint16_t colors[] = {
+                    0xf800u,
+                    0x07e0u,
+                    0x001fu,
+                    0xffffu,
+                };
+                destination565[destinationIndex] = colors[segment];
+            }
         }
     }
 
@@ -437,22 +609,27 @@ void RETRO_CALLCONV videoCallback(
         return;
     }
 
-    lastSourceWidth.store(width);
-    lastSourceHeight.store(height);
-    lastDestinationWidth.store(destinationWidth);
-    lastDestinationHeight.store(destinationHeight);
-    if (!videoPresented.exchange(true)) {
+    const bool firstPostedFrame = !videoPresented.exchange(true);
+    if (firstPostedFrame) {
         __android_log_print(
             ANDROID_LOG_INFO,
             kLogTag,
-            "First video frame posted: %ux%u to %dx%d",
+            "First video frame posted: %ux%u to %dx%d format=%d samples=%u/%u",
             width,
             height,
             destinationWidth,
-            destinationHeight
+            destinationHeight,
+            windowBuffer.format,
+            nonBlackSampleCount,
+            sampleCount
         );
-        if (contentLoaded.load()) {
+    }
+    if (contentLoaded.load()) {
+        if (sourceVisible.load() &&
+            (firstPostedFrame || firstVisibleFrame)) {
             notifyVideoRunning();
+        } else if (firstPostedFrame) {
+            notifyBlackFrame();
         }
     }
 }
@@ -551,8 +728,10 @@ void runEmulator() {
                     : 48000u
             );
             contentLoaded.store(true);
-            if (videoPresented.load()) {
+            if (videoPresented.load() && sourceVisible.load()) {
                 notifyVideoRunning();
+            } else if (videoPresented.load()) {
+                notifyBlackFrame();
             } else {
                 notifyStatus(std::string("video_wait:") + videoWaitStatus());
             }
@@ -576,9 +755,15 @@ void runEmulator() {
                 retro_run();
                 const unsigned runNumber = emulationRunCount.fetch_add(1) + 1;
                 if (runNumber >= 180 &&
-                    !videoPresented.load() &&
+                    !sourceVisible.load() &&
                     !extendedVideoWaitReported.exchange(true)) {
-                    notifyStatus(std::string("video_wait:") + videoWaitStatus());
+                    if (videoPresented.load()) {
+                        notifyBlackFrame();
+                    } else {
+                        notifyStatus(
+                            std::string("video_wait:") + videoWaitStatus()
+                        );
+                    }
                 }
 
                 const double fps = std::max(10.0, framesPerSecond.load());
@@ -719,14 +904,18 @@ Java_com_jakebrierley_ultimacontroller_NativeEmulator_nativeStart(
     coreRequestedShutdown.store(false);
     contentLoaded.store(false);
     videoPresented.store(false);
+    sourceVisible.store(false);
     extendedVideoWaitReported.store(false);
     videoCallbackCount.store(0);
     videoLockFailureCount.store(0);
     emulationRunCount.store(0);
+    lastBufferFormat.store(0);
     lastSourceWidth.store(0);
     lastSourceHeight.store(0);
     lastDestinationWidth.store(0);
     lastDestinationHeight.store(0);
+    lastSampleCount.store(0);
+    lastNonBlackSampleCount.store(0);
     displayAspectRatio.store(kFallbackAspectRatio);
     framesPerSecond.store(kFallbackFramesPerSecond);
     for (auto& state : joypadState) {
@@ -752,7 +941,7 @@ Java_com_jakebrierley_ultimacontroller_NativeEmulator_nativeSetSurface(
     }
     nativeWindow = replacement;
     if (nativeWindow != nullptr) {
-        ANativeWindow_setBuffersGeometry(
+        const int geometryResult = ANativeWindow_setBuffersGeometry(
             nativeWindow,
             0,
             0,
@@ -760,17 +949,20 @@ Java_com_jakebrierley_ultimacontroller_NativeEmulator_nativeSetSurface(
         );
         surfaceWidth.store(ANativeWindow_getWidth(nativeWindow));
         surfaceHeight.store(ANativeWindow_getHeight(nativeWindow));
+        lastBufferFormat.store(ANativeWindow_getFormat(nativeWindow));
         __android_log_print(
             ANDROID_LOG_INFO,
             kLogTag,
-            "Video surface attached: %dx%d format=%d",
+            "Video surface attached: %dx%d format=%d geometry=%d",
             surfaceWidth.load(),
             surfaceHeight.load(),
-            ANativeWindow_getFormat(nativeWindow)
+            lastBufferFormat.load(),
+            geometryResult
         );
     } else {
         surfaceWidth.store(0);
         surfaceHeight.store(0);
+        lastBufferFormat.store(0);
         __android_log_print(
             ANDROID_LOG_INFO,
             kLogTag,

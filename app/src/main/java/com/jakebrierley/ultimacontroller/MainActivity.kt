@@ -6,7 +6,6 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.PixelFormat
 import android.net.Uri
 import android.os.Bundle
 import android.text.format.Formatter
@@ -15,7 +14,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.SurfaceView
+import android.view.TextureView
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -25,11 +24,12 @@ import kotlin.math.roundToInt
 class MainActivity : Activity() {
     private lateinit var actionText: TextView
     private lateinit var controllerText: TextView
+    private lateinit var emulatorStatusText: TextView
     private lateinit var outputText: TextView
     private lateinit var displayText: TextView
     private lateinit var bridge: EmulatorBridge
     private lateinit var emulator: NativeEmulator
-    private lateinit var emulatorSurface: SurfaceView
+    private lateinit var emulatorView: TextureView
     private lateinit var contentView: View
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private var operationDialog: AlertDialog? = null
@@ -59,7 +59,7 @@ class MainActivity : Activity() {
         contentView = buildUi()
         setContentView(contentView)
         emulator = NativeEmulator(this, ::onEmulatorStatus)
-        emulator.attachTo(emulatorSurface.holder)
+        emulator.attachTo(emulatorView)
         bridge = EmulatorBridge(emulator) { message -> outputText.text = message }
         updateAction()
         contentView.post {
@@ -120,12 +120,11 @@ class MainActivity : Activity() {
 
         val emulatorFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(12, 12, 12))
-            emulatorSurface = SurfaceView(this@MainActivity).apply {
-                setBackgroundColor(Color.BLACK)
-                holder.setFormat(PixelFormat.RGBA_8888)
+            emulatorView = TextureView(this@MainActivity).apply {
+                isOpaque = true
             }
             addView(
-                emulatorSurface,
+                emulatorView,
                 FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -161,6 +160,14 @@ class MainActivity : Activity() {
             setPadding(0, dp(16), 0, dp(6))
         }
         root.addView(actionText)
+
+        emulatorStatusText = TextView(this).apply {
+            setTextColor(Color.CYAN)
+            textSize = 14f
+            text = "Emulator: waiting for imported game"
+            setPadding(0, 0, 0, dp(4))
+        }
+        root.addView(emulatorStatusText)
 
         controllerText = TextView(this).apply {
             setTextColor(Color.LTGRAY)
@@ -226,11 +233,9 @@ class MainActivity : Activity() {
     private fun onEmulatorStatus(status: EmulatorStatus) {
         if (isDestroyed) return
         emulatorStatus = status
+        emulatorStatusText.text = status.message
         displayText.visibility =
             if (status.state == EmulatorState.RUNNING) View.GONE else View.VISIBLE
-        if (status.state == EmulatorState.RUNNING) {
-            outputText.text = status.message
-        }
         refreshDisplayStatus()
     }
 

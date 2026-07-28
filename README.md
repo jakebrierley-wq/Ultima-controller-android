@@ -85,11 +85,17 @@ No configuration files are required in the installed app.
   so the game starts without depending on the core's launcher menu.
 - DOSBox Pure runs on a dedicated native frontend thread.
 - XRGB8888 software frames are nearest-neighbour scaled and aspect-fitted into
-  a platform `SurfaceView`; a 4:3 frame fits the 1280×960 display without an
-  orientation request.
+  a platform `TextureView`; keeping video inside the normal view hierarchy
+  avoids device-specific `SurfaceView` composition failures while a 4:3 frame
+  fits the 1280×960 display without an orientation request.
 - The UI reports video as running only after the first frame is successfully
   posted to the Android surface; until then it keeps visible surface/frame
   diagnostics on screen.
+- RGB8888 and RGB565 Android buffers are handled explicitly. All-black core
+  frames receive a temporary magenta border and a sampled-pixel diagnostic so
+  hardware testing can distinguish core output from surface composition.
+- The diagnostic build keeps a small red/green/blue/white calibration bar at
+  the top-left of native video. It will be removed after hardware acceptance.
 - Stereo PCM is streamed through the Android platform `AudioTrack` API.
 - Controller commands are delivered through the libretro keyboard callback.
 - Save overlays are isolated by import SHA-256 under app-private storage.
