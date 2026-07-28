@@ -3,7 +3,12 @@ name: Build Android APK
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -26,6 +31,12 @@ jobs:
 
       - name: Build debug APK
         run: gradle :app:assembleDebug
+
+      - name: Run unit tests
+        run: gradle :app:testDebugUnitTest
+
+      - name: Run Android lint
+        run: gradle :app:lintDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

@@ -1,72 +1,120 @@
 package com.jakebrierley.ultimacontroller
 
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
-import android.widget.*
-import androidx.appcompat.app.AppCompatActivity
-import android.app.AlertDialog
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import kotlin.math.roundToInt
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
     private lateinit var actionText: TextView
-    private lateinit var eventText: TextView
+    private lateinit var controllerText: TextView
+    private lateinit var outputText: TextView
+    private lateinit var displayText: TextView
     private lateinit var bridge: EmulatorBridge
     private var actionIndex = 0
     private var dialogOpen = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        hideSystemUi()
-        bridge = EmulatorBridge { eventText.text = it }
-        setContentView(buildUi())
+
+        actionIndex = savedInstanceState
+            ?.getInt(STATE_ACTION_INDEX, 0)
+            ?.coerceIn(0, Commands.all.lastIndex)
+            ?: 0
+
+        val content = buildUi()
+        setContentView(content)
+        bridge = EmulatorBridge { message -> outputText.text = message }
         updateAction()
+        content.post {
+            val orientation = when (resources.configuration.orientation) {
+                Configuration.ORIENTATION_LANDSCAPE -> "landscape"
+                Configuration.ORIENTATION_PORTRAIT -> "portrait"
+                else -> "unspecified"
+            }
+            displayText.text =
+                "CONTROLLER SHELL\n\n" +
+                    "Window ${content.width} × ${content.height} ($orientation)\n" +
+                    "No DOS core or game files are bundled"
+        }
     }
 
-    private fun hideSystemUi() {
-        window.insetsController?.let {
-            it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-            it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt(STATE_ACTION_INDEX, actionIndex)
+        super.onSaveInstanceState(outState)
     }
 
     private fun buildUi(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
-            setPadding(20, 20, 20, 20)
+            fitsSystemWindows = true
+            setPadding(dp(24), dp(20), dp(24), dp(20))
         }
 
         val emulatorFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(12, 12, 12))
-            addView(TextView(this@MainActivity).apply {
-                text = "MILESTONE 1 — CONTROLLER TEST\n\nDOS core not yet connected\nULTIMA.EXE assets embedded"
+            displayText = TextView(this@MainActivity).apply {
+                text = "CONTROLLER SHELL\n\nChecking available display…"
                 setTextColor(Color.LTGRAY)
                 gravity = Gravity.CENTER
-                textSize = 22f
-            }, FrameLayout.LayoutParams(-1, -1))
+                textSize = 20f
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+            }
+            addView(
+                displayText,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
         }
-        root.addView(emulatorFrame, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(
+            emulatorFrame,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ),
+        )
 
         actionText = TextView(this).apply {
             setTextColor(Color.WHITE)
-            textSize = 28f
-            setPadding(0, 18, 0, 8)
+            textSize = 26f
+            setPadding(0, dp(16), 0, dp(6))
         }
         root.addView(actionText)
 
-        eventText = TextView(this).apply {
+        controllerText = TextView(this).apply {
             setTextColor(Color.LTGRAY)
-            textSize = 18f
-            text = "L/R: action   A: execute   X: list   Y: keys"
+            textSize = 16f
+            text = "Controller input: waiting"
         }
-        root.addView(eventText)
+        root.addView(controllerText)
+
+        outputText = TextView(this).apply {
+            setTextColor(Color.LTGRAY)
+            textSize = 16f
+            text = "L/R: action   A: execute   X: list   Y: keys   Start: menu"
+            setPadding(0, dp(4), 0, 0)
+        }
+        root.addView(outputText)
+
         return root
     }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).roundToInt()
 
     private fun updateAction() {
         actionText.text = "ACTION: ${Commands.all[actionIndex].label}"
@@ -80,12 +128,14 @@ class MainActivity : AppCompatActivity() {
     private fun executeAction() = bridge.sendAscii(Commands.all[actionIndex].key)
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (dialogOpen) return super.dispatchKeyEvent(event)
+        val controller =
+            event.isFromSource(InputDevice.SOURCE_GAMEPAD) ||
+                event.isFromSource(InputDevice.SOURCE_JOYSTICK)
+        if (!controller || dialogOpen) return super.dispatchKeyEvent(event)
         if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount > 0) return true
-        val controller = event.source and (InputDevice.SOURCE_GAMEPAD or InputDevice.SOURCE_JOYSTICK) != 0
-        if (!controller) return super.dispatchKeyEvent(event)
 
-        eventText.text = "Android keyCode=${event.keyCode} scanCode=${event.scanCode}"
+        controllerText.text =
+            "Controller input: keyCode=${event.keyCode} scanCode=${event.scanCode}"
         return when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> { bridge.sendDirection("UP"); true }
             KeyEvent.KEYCODE_DPAD_DOWN -> { bridge.sendDirection("DOWN"); true }
@@ -99,7 +149,7 @@ class MainActivity : AppCompatActivity() {
             KeyEvent.KEYCODE_BUTTON_Y -> { showKeyPicker(); true }
             KeyEvent.KEYCODE_BUTTON_START -> { showSystemMenu(); true }
             KeyEvent.KEYCODE_BUTTON_SELECT -> { bridge.sendAscii('z'); true }
-            else -> super.dispatchKeyEvent(event)
+            else -> true
         }
     }
 
@@ -141,11 +191,15 @@ class MainActivity : AppCompatActivity() {
                 when (which) {
                     1 -> bridge.sendSpecial("ENTER")
                     2 -> bridge.sendSpecial("ESC")
-                    3 -> showKeyPicker()
+                    3 -> window.decorView.post { showKeyPicker() }
                     4 -> finish()
                 }
             }
             .setOnDismissListener { dialogOpen = false }
             .show()
+    }
+
+    private companion object {
+        const val STATE_ACTION_INDEX = "action_index"
     }
 }
