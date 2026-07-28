@@ -18,7 +18,8 @@ in the repository or APK.
    picker.
 4. Wait for the import summary. The ZIP is copied and validated before the
    previous import is replaced.
-5. DOSBox Pure starts from the retained app-private ZIP.
+5. DOSBox Pure mounts the private extracted installation and directly launches
+   the validated root-level `ULTIMA.EXE`.
 
 Imported files are stored under the app's private `filesDir` and are removed
 when the app is uninstalled. The Start menu can replace or remove an import.
@@ -26,7 +27,7 @@ The original ZIP is never modified.
 
 Imports created by the earlier `0.2-import` tester must be selected once more.
 That build retained only the extracted validation copy; this build also retains
-the validated ZIP required by DOSBox Pure.
+the validated ZIP for reproducible import metadata and later integration work.
 
 The importer rejects unsafe paths, case-insensitive duplicate file names,
 missing root-level `ULTIMA.EXE`, more than 1,024 files, ZIPs larger than 64 MiB,
@@ -48,8 +49,8 @@ Every controller press displays Android `keyCode` and `scanCode`. This keeps
 RG477V-specific mapping differences visible while keys are delivered to
 DOSBox Pure.
 
-DOSBox Pure's own start menu accepts the D-pad. Use **Start → Send Enter** to
-choose an item when the persistent action button is not appropriate.
+The validated `ULTIMA.EXE` is launched directly. DOSBox Pure's start menu may
+appear after the program exits; it accepts the D-pad and **Start → Send Enter**.
 
 ## Build
 
@@ -79,12 +80,16 @@ No configuration files are required in the installed app.
   request broad storage permissions.
 - Import extraction runs away from the UI thread and atomically replaces the
   current private import only after validation succeeds.
-- The validated ZIP is retained under app-private storage and passed to
-  DOSBox Pure by absolute path.
+- The validated ZIP and extracted installation are retained under app-private
+  storage. The root-level `ULTIMA.EXE` is passed to DOSBox Pure by absolute path
+  so the game starts without depending on the core's launcher menu.
 - DOSBox Pure runs on a dedicated native frontend thread.
 - XRGB8888 software frames are nearest-neighbour scaled and aspect-fitted into
   a platform `SurfaceView`; a 4:3 frame fits the 1280×960 display without an
   orientation request.
+- The UI reports video as running only after the first frame is successfully
+  posted to the Android surface; until then it keeps visible surface/frame
+  diagnostics on screen.
 - Stereo PCM is streamed through the Android platform `AudioTrack` API.
 - Controller commands are delivered through the libretro keyboard callback.
 - Save overlays are isolated by import SHA-256 under app-private storage.

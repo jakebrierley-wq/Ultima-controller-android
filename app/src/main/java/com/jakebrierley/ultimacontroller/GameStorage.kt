@@ -73,6 +73,16 @@ object GameStorage {
             )
         }
 
+    fun importedGameExecutable(context: Context): File? =
+        currentSummary(context)?.let {
+            findRequiredExecutable(
+                File(
+                    File(context.filesDir, IMPORT_CONTAINER_NAME),
+                    GAME_FILES_DIRECTORY_NAME,
+                ),
+            )
+        }
+
     fun importArchive(context: Context, source: Uri): GameImportSummary {
         beginOperation()
         val appContext = context.applicationContext
@@ -262,10 +272,15 @@ object GameStorage {
             .forEach(File::delete)
     }
 
-    private fun containsRequiredExecutable(gameDirectory: File): Boolean =
+    internal fun findRequiredExecutable(gameDirectory: File): File? =
         gameDirectory.listFiles()
             .orEmpty()
-            .any { it.isFile && it.name.equals(REQUIRED_EXECUTABLE, ignoreCase = true) }
+            .firstOrNull {
+                it.isFile && it.name.equals(REQUIRED_EXECUTABLE, ignoreCase = true)
+            }
+
+    private fun containsRequiredExecutable(gameDirectory: File): Boolean =
+        findRequiredExecutable(gameDirectory) != null
 
     private const val IMPORT_CONTAINER_NAME = "imported-game"
     private const val GAME_FILES_DIRECTORY_NAME = "files"

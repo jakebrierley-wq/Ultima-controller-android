@@ -219,8 +219,8 @@ class MainActivity : Activity() {
             return
         }
         val summary = GameStorage.currentSummary(this) ?: return
-        val archive = GameStorage.importedGameArchive(this) ?: return
-        emulator.start(archive, summary.archiveSha256)
+        val executable = GameStorage.importedGameExecutable(this) ?: return
+        emulator.start(executable, summary.archiveSha256)
     }
 
     private fun onEmulatorStatus(status: EmulatorStatus) {

@@ -55,6 +55,19 @@ std::string contentPath;
 std::string systemDirectory;
 std::string saveDirectory;
 
+std::atomic<bool> contentLoaded{false};
+std::atomic<bool> videoPresented{false};
+std::atomic<bool> extendedVideoWaitReported{false};
+std::atomic<unsigned> videoCallbackCount{0};
+std::atomic<unsigned> videoLockFailureCount{0};
+std::atomic<unsigned> emulationRunCount{0};
+std::atomic<int> surfaceWidth{0};
+std::atomic<int> surfaceHeight{0};
+std::atomic<unsigned> lastSourceWidth{0};
+std::atomic<unsigned> lastSourceHeight{0};
+std::atomic<int> lastDestinationWidth{0};
+std::atomic<int> lastDestinationHeight{0};
+
 std::atomic<retro_keyboard_event_t> keyboardEvent{nullptr};
 std::atomic<int16_t> joypadState[16];
 
@@ -128,6 +141,25 @@ void notifyStatus(const std::string& status) {
     if (attachedHere) {
         javaVm->DetachCurrentThread();
     }
+}
+
+std::string videoWaitStatus() {
+    return std::string("DOSBox Pure loaded ULTIMA.EXE; waiting for the first ") +
+        "posted video frame (surface " +
+        std::to_string(surfaceWidth.load()) + "x" +
+        std::to_string(surfaceHeight.load()) + ", callbacks " +
+        std::to_string(videoCallbackCount.load()) + ", lock failures " +
+        std::to_string(videoLockFailureCount.load()) + ")";
+}
+
+void notifyVideoRunning() {
+    notifyStatus(
+        std::string("running:") +
+        std::to_string(lastSourceWidth.load()) + "x" +
+        std::to_string(lastSourceHeight.load()) + " to " +
+        std::to_string(lastDestinationWidth.load()) + "x" +
+        std::to_string(lastDestinationHeight.load())
+    );
 }
 
 void configureAudio(unsigned sampleRate) {
@@ -311,13 +343,23 @@ void RETRO_CALLCONV videoCallback(
         return;
     }
 
+    videoCallbackCount.fetch_add(1);
     std::lock_guard<std::mutex> lock(surfaceMutex);
     if (nativeWindow == nullptr) {
         return;
     }
 
     ANativeWindow_Buffer windowBuffer;
-    if (ANativeWindow_lock(nativeWindow, &windowBuffer, nullptr) != 0) {
+    const int lockResult =
+        ANativeWindow_lock(nativeWindow, &windowBuffer, nullptr);
+    if (lockResult != 0) {
+        videoLockFailureCount.fetch_add(1);
+        __android_log_print(
+            ANDROID_LOG_ERROR,
+            kLogTag,
+            "ANativeWindow_lock failed: %d",
+            lockResult
+        );
         return;
     }
 
@@ -383,7 +425,36 @@ void RETRO_CALLCONV videoCallback(
         }
     }
 
-    ANativeWindow_unlockAndPost(nativeWindow);
+    const int postResult = ANativeWindow_unlockAndPost(nativeWindow);
+    if (postResult != 0) {
+        videoLockFailureCount.fetch_add(1);
+        __android_log_print(
+            ANDROID_LOG_ERROR,
+            kLogTag,
+            "ANativeWindow_unlockAndPost failed: %d",
+            postResult
+        );
+        return;
+    }
+
+    lastSourceWidth.store(width);
+    lastSourceHeight.store(height);
+    lastDestinationWidth.store(destinationWidth);
+    lastDestinationHeight.store(destinationHeight);
+    if (!videoPresented.exchange(true)) {
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kLogTag,
+            "First video frame posted: %ux%u to %dx%d",
+            width,
+            height,
+            destinationWidth,
+            destinationHeight
+        );
+        if (contentLoaded.load()) {
+            notifyVideoRunning();
+        }
+    }
 }
 
 size_t RETRO_CALLCONV audioCallback(const int16_t* samples, size_t frames) {
@@ -465,7 +536,7 @@ void runEmulator() {
         retro_game_info gameInfo{};
         gameInfo.path = contentPath.c_str();
         if (!retro_load_game(&gameInfo)) {
-            notifyStatus("error:DOSBox Pure rejected the imported archive");
+            notifyStatus("error:DOSBox Pure rejected the imported ULTIMA.EXE");
         } else {
             gameLoaded = true;
             retro_system_av_info avInfo{};
@@ -479,7 +550,12 @@ void runEmulator() {
                     ? static_cast<unsigned>(std::lround(avInfo.timing.sample_rate))
                     : 48000u
             );
-            notifyStatus("running");
+            contentLoaded.store(true);
+            if (videoPresented.load()) {
+                notifyVideoRunning();
+            } else {
+                notifyStatus(std::string("video_wait:") + videoWaitStatus());
+            }
 
             auto nextFrame = std::chrono::steady_clock::now();
             while (!stopRequested.load() && !coreRequestedShutdown.load()) {
@@ -498,6 +574,12 @@ void runEmulator() {
                 }
 
                 retro_run();
+                const unsigned runNumber = emulationRunCount.fetch_add(1) + 1;
+                if (runNumber >= 180 &&
+                    !videoPresented.load() &&
+                    !extendedVideoWaitReported.exchange(true)) {
+                    notifyStatus(std::string("video_wait:") + videoWaitStatus());
+                }
 
                 const double fps = std::max(10.0, framesPerSecond.load());
                 const auto frameDuration = std::chrono::duration<double>(1.0 / fps);
@@ -525,6 +607,7 @@ void runEmulator() {
     if (coreInitialized) {
         retro_deinit();
     }
+    contentLoaded.store(false);
     running.store(false);
     if (!coreRequestedShutdown.load() && stopRequested.load()) {
         notifyStatus("stopped");
@@ -634,6 +717,16 @@ Java_com_jakebrierley_ultimacontroller_NativeEmulator_nativeStart(
     stopRequested.store(false);
     paused.store(false);
     coreRequestedShutdown.store(false);
+    contentLoaded.store(false);
+    videoPresented.store(false);
+    extendedVideoWaitReported.store(false);
+    videoCallbackCount.store(0);
+    videoLockFailureCount.store(0);
+    emulationRunCount.store(0);
+    lastSourceWidth.store(0);
+    lastSourceHeight.store(0);
+    lastDestinationWidth.store(0);
+    lastDestinationHeight.store(0);
     displayAspectRatio.store(kFallbackAspectRatio);
     framesPerSecond.store(kFallbackFramesPerSecond);
     for (auto& state : joypadState) {
@@ -664,6 +757,24 @@ Java_com_jakebrierley_ultimacontroller_NativeEmulator_nativeSetSurface(
             0,
             0,
             WINDOW_FORMAT_RGBA_8888
+        );
+        surfaceWidth.store(ANativeWindow_getWidth(nativeWindow));
+        surfaceHeight.store(ANativeWindow_getHeight(nativeWindow));
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kLogTag,
+            "Video surface attached: %dx%d format=%d",
+            surfaceWidth.load(),
+            surfaceHeight.load(),
+            ANativeWindow_getFormat(nativeWindow)
+        );
+    } else {
+        surfaceWidth.store(0);
+        surfaceHeight.store(0);
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kLogTag,
+            "Video surface detached"
         );
     }
 }

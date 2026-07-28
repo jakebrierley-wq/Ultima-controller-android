@@ -40,6 +40,8 @@ class NativeEmulator(
     private var attachedHolder: SurfaceHolder? = null
     private var libraryReady = false
     @Volatile
+    private var videoReady = false
+    @Volatile
     private var started = false
 
     val isRunning: Boolean
@@ -55,7 +57,7 @@ class NativeEmulator(
         }
     }
 
-    fun start(contentArchive: File, archiveSha256: String): Boolean {
+    fun start(gameExecutable: File, archiveSha256: String): Boolean {
         if (started) return true
         if (!ensureNativeLibrary()) {
             publishStatus(
@@ -67,10 +69,10 @@ class NativeEmulator(
         attachedHolder?.surface
             ?.takeIf(Surface::isValid)
             ?.let(::setSurface)
-        if (!contentArchive.isFile || contentArchive.length() <= 0L) {
+        if (!gameExecutable.isFile || gameExecutable.length() <= 0L) {
             publishStatus(
                 EmulatorState.ERROR,
-                "The imported DOS archive is missing; import it again",
+                "The imported ULTIMA.EXE is missing; import the game ZIP again",
             )
             return false
         }
@@ -89,8 +91,9 @@ class NativeEmulator(
         }
 
         publishStatus(EmulatorState.STARTING, "Starting DOSBox Pure…")
+        videoReady = false
         started = nativeStart(
-            contentArchive.absolutePath,
+            gameExecutable.absolutePath,
             systemDirectory.absolutePath,
             saveDirectory.absolutePath,
         )
@@ -118,7 +121,14 @@ class NativeEmulator(
         }
         if (started && libraryReady) {
             nativeSetPaused(false)
-            publishStatus(EmulatorState.RUNNING, "DOSBox Pure is running")
+            publishStatus(
+                if (videoReady) EmulatorState.RUNNING else EmulatorState.STARTING,
+                if (videoReady) {
+                    "DOSBox Pure video is active"
+                } else {
+                    "DOSBox Pure loaded; waiting for its first video frame"
+                },
+            )
         }
     }
 
@@ -145,6 +155,7 @@ class NativeEmulator(
             nativeStop()
         }
         started = false
+        videoReady = false
         releaseAudio()
         publishStatus(EmulatorState.IDLE, "Emulator stopped")
     }
@@ -185,13 +196,25 @@ class NativeEmulator(
     @Suppress("unused")
     private fun onNativeStatus(status: String) {
         when {
-            status == "running" -> {
+            status.startsWith("running:") -> {
                 started = true
-                publishStatus(EmulatorState.RUNNING, "DOSBox Pure is running")
+                videoReady = true
+                publishStatus(
+                    EmulatorState.RUNNING,
+                    "DOSBox Pure video active (${status.removePrefix("running:")})",
+                )
+            }
+
+            status.startsWith("video_wait:") -> {
+                publishStatus(
+                    EmulatorState.STARTING,
+                    status.removePrefix("video_wait:"),
+                )
             }
 
             status == "stopped" -> {
                 started = false
+                videoReady = false
                 releaseAudio()
                 publishStatus(EmulatorState.IDLE, "DOSBox Pure stopped")
             }

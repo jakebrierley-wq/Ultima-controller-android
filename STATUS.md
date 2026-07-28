@@ -17,10 +17,12 @@ Implemented:
 - Atomic import replacement, interrupted-replacement recovery, and removal
 - Import archive checksum and file/size summary
 - Retained app-private content ZIP for the emulator core
+- Direct launch of the validated root-level ULTIMA.EXE
 - Pinned DOSBox Pure 1.0-preview6 source submodule
 - Arm64 Android NDK build with 16 KiB ELF page alignment
 - Minimal libretro environment, video, audio, input, and lifecycle frontend
 - 4:3-aware nearest-neighbour software rendering to a platform SurfaceView
+- First-frame-gated running status with visible surface/video diagnostics
 - Stereo PCM output through Android AudioTrack
 - DOS keyboard event delivery from the persistent controller shell
 - Per-import app-private DOSBox Pure save directory
