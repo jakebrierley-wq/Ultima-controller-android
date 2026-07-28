@@ -30,6 +30,9 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+
       - name: Install pinned Android NDK
         run: sdkmanager "ndk;27.2.12479018"
 
