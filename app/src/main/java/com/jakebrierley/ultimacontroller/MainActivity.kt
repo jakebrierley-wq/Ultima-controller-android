@@ -14,6 +14,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.TextureView
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -23,14 +24,21 @@ import kotlin.math.roundToInt
 class MainActivity : Activity() {
     private lateinit var actionText: TextView
     private lateinit var controllerText: TextView
+    private lateinit var emulatorStatusText: TextView
     private lateinit var outputText: TextView
     private lateinit var displayText: TextView
     private lateinit var bridge: EmulatorBridge
+    private lateinit var emulator: NativeEmulator
+    private lateinit var emulatorView: TextureView
     private lateinit var contentView: View
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private var operationDialog: AlertDialog? = null
     private var actionIndex = 0
     private var dialogOpen = false
+    private var emulatorStatus = EmulatorStatus(
+        EmulatorState.IDLE,
+        "Waiting for an imported game",
+    )
     private val statusRefresh = object : Runnable {
         override fun run() {
             refreshDisplayStatus()
@@ -50,20 +58,37 @@ class MainActivity : Activity() {
 
         contentView = buildUi()
         setContentView(contentView)
-        bridge = EmulatorBridge { message -> outputText.text = message }
+        emulator = NativeEmulator(this, ::onEmulatorStatus)
+        emulator.attachTo(emulatorView)
+        bridge = EmulatorBridge(emulator) { message -> outputText.text = message }
         updateAction()
-        contentView.post(statusRefresh)
+        contentView.post {
+            statusRefresh.run()
+            startEmulationIfReady()
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        if (::emulator.isInitialized) {
+            emulator.resume()
+        }
         if (::contentView.isInitialized) {
             contentView.removeCallbacks(statusRefresh)
-            contentView.post(statusRefresh)
+            contentView.post {
+                statusRefresh.run()
+                startEmulationIfReady()
+            }
         }
     }
 
     override fun onPause() {
+        if (::bridge.isInitialized) {
+            bridge.releaseDirections()
+        }
+        if (::emulator.isInitialized) {
+            emulator.pause()
+        }
         if (::contentView.isInitialized) {
             contentView.removeCallbacks(statusRefresh)
         }
@@ -73,6 +98,9 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         operationDialog?.dismiss()
         operationDialog = null
+        if (::emulator.isInitialized) {
+            emulator.close()
+        }
         ioExecutor.shutdown()
         super.onDestroy()
     }
@@ -92,6 +120,16 @@ class MainActivity : Activity() {
 
         val emulatorFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(12, 12, 12))
+            emulatorView = TextureView(this@MainActivity).apply {
+                isOpaque = true
+            }
+            addView(
+                emulatorView,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
             displayText = TextView(this@MainActivity).apply {
                 text = "CONTROLLER SHELL\n\nChecking available display…"
                 setTextColor(Color.LTGRAY)
@@ -122,6 +160,14 @@ class MainActivity : Activity() {
             setPadding(0, dp(16), 0, dp(6))
         }
         root.addView(actionText)
+
+        emulatorStatusText = TextView(this).apply {
+            setTextColor(Color.CYAN)
+            textSize = 14f
+            text = "Emulator: waiting for imported game"
+            setPadding(0, 0, 0, dp(4))
+        }
+        root.addView(emulatorStatusText)
 
         controllerText = TextView(this).apply {
             setTextColor(Color.LTGRAY)
@@ -154,18 +200,43 @@ class MainActivity : Activity() {
             else -> {
                 val summary = GameStorage.currentSummary(this)
                 if (summary == null) {
-                    "Game import: none\nStart → Import game ZIP"
+                    "Game import: none or requires re-import\nStart → Import game ZIP"
                 } else {
                     val size = Formatter.formatShortFileSize(this, summary.totalBytes)
                     "Game import: ready (${summary.fileCount} files, $size)"
                 }
             }
         }
-        displayText.text =
-            "CONTROLLER SHELL\n\n" +
-                "Window ${contentView.width} × ${contentView.height} ($orientation)\n" +
-                "$importStatus\n" +
-                "DOS core not connected; no game files are bundled"
+        if (emulatorStatus.state != EmulatorState.RUNNING) {
+            displayText.visibility = View.VISIBLE
+            displayText.text =
+                "DOSBOX PURE CONTROLLER SHELL\n\n" +
+                    "Window ${contentView.width} × ${contentView.height} ($orientation)\n" +
+                    "$importStatus\n" +
+                    "${emulatorStatus.message}\n" +
+                    "No game files are bundled"
+        }
+    }
+
+    private fun startEmulationIfReady() {
+        if (!::emulator.isInitialized ||
+            emulator.isRunning ||
+            GameStorage.isOperationInProgress()
+        ) {
+            return
+        }
+        val summary = GameStorage.currentSummary(this) ?: return
+        val executable = GameStorage.importedGameExecutable(this) ?: return
+        emulator.start(executable, summary.archiveSha256)
+    }
+
+    private fun onEmulatorStatus(status: EmulatorStatus) {
+        if (isDestroyed) return
+        emulatorStatus = status
+        emulatorStatusText.text = status.message
+        displayText.visibility =
+            if (status.state == EmulatorState.RUNNING) View.GONE else View.VISIBLE
+        refreshDisplayStatus()
     }
 
     private fun dp(value: Int): Int =
@@ -186,24 +257,78 @@ class MainActivity : Activity() {
         val controller =
             event.isFromSource(InputDevice.SOURCE_GAMEPAD) ||
                 event.isFromSource(InputDevice.SOURCE_JOYSTICK)
-        if (!controller || dialogOpen) return super.dispatchKeyEvent(event)
-        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount > 0) return true
+        if (!controller) return super.dispatchKeyEvent(event)
+        if (dialogOpen) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> bridge.setDirection("UP", false)
+                    KeyEvent.KEYCODE_DPAD_DOWN -> bridge.setDirection("DOWN", false)
+                    KeyEvent.KEYCODE_DPAD_LEFT -> bridge.setDirection("LEFT", false)
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> bridge.setDirection("RIGHT", false)
+                }
+            }
+            return super.dispatchKeyEvent(event)
+        }
+        val down = event.action == KeyEvent.ACTION_DOWN
+        if (event.action != KeyEvent.ACTION_DOWN &&
+            event.action != KeyEvent.ACTION_UP
+        ) {
+            return true
+        }
 
-        controllerText.text =
-            "Controller input: keyCode=${event.keyCode} scanCode=${event.scanCode}"
+        if (down && event.repeatCount == 0) {
+            controllerText.text =
+                "Controller input: keyCode=${event.keyCode} scanCode=${event.scanCode}"
+        }
         return when (event.keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> { bridge.sendDirection("UP"); true }
-            KeyEvent.KEYCODE_DPAD_DOWN -> { bridge.sendDirection("DOWN"); true }
-            KeyEvent.KEYCODE_DPAD_LEFT -> { bridge.sendDirection("LEFT"); true }
-            KeyEvent.KEYCODE_DPAD_RIGHT -> { bridge.sendDirection("RIGHT"); true }
-            KeyEvent.KEYCODE_BUTTON_A -> { executeAction(); true }
-            KeyEvent.KEYCODE_BUTTON_B -> { bridge.sendSpecial("ESC"); true }
-            KeyEvent.KEYCODE_BUTTON_L1 -> { cycle(-1); true }
-            KeyEvent.KEYCODE_BUTTON_R1 -> { cycle(1); true }
-            KeyEvent.KEYCODE_BUTTON_X -> { showActionList(); true }
-            KeyEvent.KEYCODE_BUTTON_Y -> { showKeyPicker(); true }
-            KeyEvent.KEYCODE_BUTTON_START -> { showSystemMenu(); true }
-            KeyEvent.KEYCODE_BUTTON_SELECT -> { bridge.sendAscii('z'); true }
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                bridge.setDirection("UP", down)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                bridge.setDirection("DOWN", down)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                bridge.setDirection("LEFT", down)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                bridge.setDirection("RIGHT", down)
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_A -> {
+                if (down && event.repeatCount == 0) executeAction()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_B -> {
+                if (down && event.repeatCount == 0) bridge.sendSpecial("ESC")
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_L1 -> {
+                if (down && event.repeatCount == 0) cycle(-1)
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_R1 -> {
+                if (down && event.repeatCount == 0) cycle(1)
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_X -> {
+                if (down && event.repeatCount == 0) showActionList()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_Y -> {
+                if (down && event.repeatCount == 0) showKeyPicker()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_START -> {
+                if (down && event.repeatCount == 0) showSystemMenu()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_SELECT -> {
+                if (down && event.repeatCount == 0) bridge.sendAscii('z')
+                true
+            }
             else -> true
         }
     }
@@ -254,11 +379,18 @@ class MainActivity : Activity() {
                 },
             )
             if (existingImport != null) {
+                add(
+                    SystemMenuItem("Restart DOSBox Pure") {
+                        emulator.stop()
+                        startEmulationIfReady()
+                    },
+                )
                 add(SystemMenuItem("Remove imported game") { showRemoveConfirmation() })
             }
             add(SystemMenuItem("Send Enter") { bridge.sendSpecial("ENTER") })
             add(SystemMenuItem("Send Escape") { bridge.sendSpecial("ESC") })
             add(SystemMenuItem("Show key picker") { showKeyPicker() })
+            add(SystemMenuItem("About / licenses") { showLicenseNotice() })
             add(SystemMenuItem("Exit app") { finish() })
         }
         var pendingAction: (() -> Unit)? = null
@@ -337,6 +469,7 @@ class MainActivity : Activity() {
             return
         }
 
+        emulator.stop()
         showOperationDialog("Importing and validating the selected ZIP…")
         ioExecutor.execute {
             val result = runCatching {
@@ -353,14 +486,16 @@ class MainActivity : Activity() {
                             "IMPORT COMPLETE",
                             "${summary.fileCount} files imported ($size).\n\n" +
                                 "Archive SHA-256:\n${summary.archiveSha256}\n\n" +
-                                "The DOS core remains disabled.",
+                                "DOSBox Pure is starting.",
                         )
+                        startEmulationIfReady()
                     },
                     onFailure = { error ->
                         showMessage(
                             "IMPORT FAILED",
                             error.message ?: "The selected ZIP could not be imported.",
                         )
+                        startEmulationIfReady()
                     },
                 )
             }
@@ -390,6 +525,7 @@ class MainActivity : Activity() {
             return
         }
 
+        emulator.stop()
         showOperationDialog("Removing the private game-file copy…")
         ioExecutor.execute {
             val result = runCatching { GameStorage.removeImport(applicationContext) }
@@ -446,6 +582,18 @@ class MainActivity : Activity() {
             .setPositiveButton("OK", null)
             .setOnDismissListener { dialogOpen = false }
             .show()
+    }
+
+    private fun showLicenseNotice() {
+        showMessage(
+            "ABOUT / LICENSES",
+            "Ultima Controller Android is GPL-2.0-or-later software.\n\n" +
+                "DOSBox Pure 1.0-preview6 is built from unmodified source at " +
+                "commit a4a0bab and is GPL-2.0-or-later.\n\n" +
+                "Complete source, license text, and build scripts:\n" +
+                "github.com/jakebrierley-wq/Ultima-controller-android\n\n" +
+                "No Ultima game files are included.",
+        )
     }
 
     private data class SystemMenuItem(

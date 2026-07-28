@@ -1,0 +1,3 @@
+[submodule "third_party/dosbox-pure"]
+	path = third_party/dosbox-pure
+	url = https://github.com/schellingb/dosbox-pure.git

@@ -30,8 +30,15 @@ object GameStorage {
         }
         val container = File(context.filesDir, IMPORT_CONTAINER_NAME)
         val gameDirectory = File(container, GAME_FILES_DIRECTORY_NAME)
+        val contentArchive = File(container, CONTENT_ARCHIVE_NAME)
         val metadataFile = File(container, METADATA_FILE_NAME)
-        if (!gameDirectory.isDirectory || !metadataFile.isFile) return null
+        if (!gameDirectory.isDirectory ||
+            !contentArchive.isFile ||
+            contentArchive.length() <= 0L ||
+            !metadataFile.isFile
+        ) {
+            return null
+        }
         if (!containsRequiredExecutable(gameDirectory)) return null
 
         return runCatching {
@@ -58,6 +65,24 @@ object GameStorage {
             )
         }
 
+    fun importedGameArchive(context: Context): File? =
+        currentSummary(context)?.let {
+            File(
+                File(context.filesDir, IMPORT_CONTAINER_NAME),
+                CONTENT_ARCHIVE_NAME,
+            )
+        }
+
+    fun importedGameExecutable(context: Context): File? =
+        currentSummary(context)?.let {
+            findRequiredExecutable(
+                File(
+                    File(context.filesDir, IMPORT_CONTAINER_NAME),
+                    GAME_FILES_DIRECTORY_NAME,
+                ),
+            )
+        }
+
     fun importArchive(context: Context, source: Uri): GameImportSummary {
         beginOperation()
         val appContext = context.applicationContext
@@ -80,6 +105,10 @@ object GameStorage {
                 fileCount = extracted.fileCount,
                 totalBytes = extracted.totalBytes,
                 archiveSha256 = archiveSha256,
+            )
+            retainArchive(
+                archiveCopy,
+                File(stagingContainer, CONTENT_ARCHIVE_NAME),
             )
             writeMetadata(File(stagingContainer, METADATA_FILE_NAME), summary)
             replaceCurrentImport(appContext.filesDir, stagingContainer, operationId)
@@ -168,6 +197,25 @@ object GameStorage {
         }
     }
 
+    private fun retainArchive(source: File, destination: File) {
+        destination.parentFile?.let { parent ->
+            if (!parent.isDirectory && !parent.mkdirs()) {
+                throw GameImportException("Could not create private archive storage")
+            }
+        }
+        if (source.renameTo(destination)) return
+
+        FileInputStream(source).use { input ->
+            BufferedOutputStream(FileOutputStream(destination)).use { output ->
+                input.copyTo(output, COPY_BUFFER_BYTES)
+            }
+        }
+        if (!destination.isFile || destination.length() != source.length()) {
+            destination.delete()
+            throw GameImportException("Could not retain the validated game archive")
+        }
+    }
+
     private fun replaceCurrentImport(
         filesDirectory: File,
         stagingContainer: File,
@@ -224,13 +272,19 @@ object GameStorage {
             .forEach(File::delete)
     }
 
-    private fun containsRequiredExecutable(gameDirectory: File): Boolean =
+    internal fun findRequiredExecutable(gameDirectory: File): File? =
         gameDirectory.listFiles()
             .orEmpty()
-            .any { it.isFile && it.name.equals(REQUIRED_EXECUTABLE, ignoreCase = true) }
+            .firstOrNull {
+                it.isFile && it.name.equals(REQUIRED_EXECUTABLE, ignoreCase = true)
+            }
+
+    private fun containsRequiredExecutable(gameDirectory: File): Boolean =
+        findRequiredExecutable(gameDirectory) != null
 
     private const val IMPORT_CONTAINER_NAME = "imported-game"
     private const val GAME_FILES_DIRECTORY_NAME = "files"
+    private const val CONTENT_ARCHIVE_NAME = "content.zip"
     private const val METADATA_FILE_NAME = "metadata.properties"
     private const val STAGING_CONTAINER_PREFIX = ".imported-game-staging-"
     private const val BACKUP_CONTAINER_PREFIX = ".imported-game-backup-"
@@ -238,7 +292,7 @@ object GameStorage {
     private const val REQUIRED_EXECUTABLE = "ULTIMA.EXE"
     private const val COPY_BUFFER_BYTES = 32 * 1024
     private const val MAX_ARCHIVE_BYTES = 64L * 1024L * 1024L
-    private const val METADATA_FORMAT_VERSION = "1"
+    private const val METADATA_FORMAT_VERSION = "2"
     private const val KEY_FORMAT_VERSION = "formatVersion"
     private const val KEY_FILE_COUNT = "fileCount"
     private const val KEY_TOTAL_BYTES = "totalBytes"

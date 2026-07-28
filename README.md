@@ -1,11 +1,10 @@
-# Ultima Controller Android — Runtime Import Milestone
+# Ultima Controller Android — Native Bootstrap Milestone
 
 Target: Anbernic RG477V, Android 14, 1280×960 4:3 display.
 
-This package is a startup and controller-input diagnostic shell. It uses the
-device's current orientation and available window instead of requesting a
-portrait or landscape rotation. `EmulatorBridge` is deliberately a test stub;
-there is no DOSBox integration yet.
+This package is a controller-focused Android frontend for the pinned DOSBox
+Pure libretro core. It uses the device's current orientation and available
+window instead of requesting a portrait or landscape rotation.
 
 No Ultima executables, data files, artwork, or other game assets are included
 in the repository or APK.
@@ -19,10 +18,16 @@ in the repository or APK.
    picker.
 4. Wait for the import summary. The ZIP is copied and validated before the
    previous import is replaced.
+5. DOSBox Pure mounts the private extracted installation and directly launches
+   the validated root-level `ULTIMA.EXE`.
 
 Imported files are stored under the app's private `filesDir` and are removed
 when the app is uninstalled. The Start menu can replace or remove an import.
 The original ZIP is never modified.
+
+Imports created by the earlier `0.2-import` tester must be selected once more.
+That build retained only the extracted validation copy; this build also retains
+the validated ZIP for reproducible import metadata and later integration work.
 
 The importer rejects unsafe paths, case-insensitive duplicate file names,
 missing root-level `ULTIMA.EXE`, more than 1,024 files, ZIPs larger than 64 MiB,
@@ -31,7 +36,7 @@ larger than 256 MiB.
 
 ## Default controls
 
-- D-pad: directional DOS keys
+- D-pad: held directional DOS keys
 - A: execute persistent action
 - B: Escape
 - L/R: previous/next action
@@ -40,13 +45,19 @@ larger than 256 MiB.
 - Start: system menu
 - Select: currently sends `Z` as a diagnostic placeholder
 
-Every controller press displays Android `keyCode` and `scanCode`. This identifies any RG477V-specific mapping differences before connecting the keys to DOSBox.
+Every controller press displays Android `keyCode` and `scanCode`. This keeps
+RG477V-specific mapping differences visible while keys are delivered to
+DOSBox Pure.
+
+The validated `ULTIMA.EXE` is launched directly. DOSBox Pure's start menu may
+appear after the program exits; it accepts the D-pad and **Start → Send Enter**.
 
 ## Build
 
 The project requires JDK 17, Android SDK 35, and Gradle 8.9.
 
 ```text
+git submodule update --init
 gradle :app:assembleDebug
 gradle :app:testDebugUnitTest
 gradle :app:lintDebug
@@ -69,8 +80,36 @@ No configuration files are required in the installed app.
   request broad storage permissions.
 - Import extraction runs away from the UI thread and atomically replaces the
   current private import only after validation succeeds.
+- The validated ZIP and extracted installation are retained under app-private
+  storage. The root-level `ULTIMA.EXE` is passed to DOSBox Pure by absolute path
+  so the game starts without depending on the core's launcher menu.
+- DOSBox Pure runs on a dedicated native frontend thread.
+- XRGB8888 software frames are nearest-neighbour scaled and aspect-fitted into
+  a platform `TextureView`; keeping video inside the normal view hierarchy
+  avoids device-specific `SurfaceView` composition failures while a 4:3 frame
+  fits the 1280×960 display without an orientation request.
+- The UI reports video as running only after the first frame is successfully
+  posted to the Android surface; until then it keeps visible surface/frame
+  diagnostics on screen.
+- RGB8888 and RGB565 Android buffers are handled explicitly. All-black core
+  frames receive a temporary magenta border and a sampled-pixel diagnostic so
+  hardware testing can distinguish core output from surface composition.
+- The diagnostic build keeps a small red/green/blue/white calibration bar at
+  the top-left of native video. It will be removed after hardware acceptance.
+- Stereo PCM is streamed through the Android platform `AudioTrack` API.
+- Controller commands are delivered through the libretro keyboard callback.
+- Save overlays are isolated by import SHA-256 under app-private storage.
 
-## Out of scope
+## Current limitations
 
-DOS emulation and executable launch remain intentionally deferred. Importing
-files only validates and stores them; it does not execute game code.
+- Core option UI, save export, save states, and prompt recognition are not
+  implemented yet.
+- Hardware validation on the RG477V is required before gameplay work expands.
+- The first native milestone intentionally uses software video rather than
+  OpenGL/Vulkan.
+
+## Licensing
+
+The application is GPL-2.0-or-later. DOSBox Pure `1.0-preview6` is included as
+an unmodified, pinned source submodule under the same license terms. See
+[`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
