@@ -1,26 +1,4 @@
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-}
-
-android {
-    namespace = "com.jakebrierley.ultimacontroller"
-    compileSdk = 35
-
-    defaultConfig {
-        applicationId = "com.jakebrierley.ultimacontroller"
-        minSdk = 26
-        targetSdk = 35
-        versionCode = 1
-        versionName = "0.1-m1"
-    }
-
-    buildFeatures { viewBinding = false }
-
-    kotlinOptions { jvmTarget = "17" }
-}
-
-dependencies {
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.appcompat:appcompat:1.7.0")
+    id("com.android.application") version "8.7.3" apply false
+    id("org.jetbrains.kotlin.android") version "2.1.0" apply false
 }
